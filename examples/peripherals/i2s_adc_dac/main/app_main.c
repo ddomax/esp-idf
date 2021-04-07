@@ -10,6 +10,7 @@
 #include "driver/adc.h"
 #include "audio_example_file.h"
 #include "esp_adc_cal.h"
+#include "soc/syscon_periph.h"
 
 static const char* TAG = "ad/da";
 #define V_REF   1100
@@ -28,21 +29,21 @@ static const char* TAG = "ad/da";
 //i2s number
 #define EXAMPLE_I2S_NUM           (0)
 //i2s sample rate
-#define EXAMPLE_I2S_SAMPLE_RATE   (16000)
+#define EXAMPLE_I2S_SAMPLE_RATE   (500000)
 //i2s data bits
 #define EXAMPLE_I2S_SAMPLE_BITS   (16)
 //enable display buffer for debug
-#define EXAMPLE_I2S_BUF_DEBUG     (0)
+#define EXAMPLE_I2S_BUF_DEBUG     (1)
 //I2S read buffer length
 #define EXAMPLE_I2S_READ_LEN      (16 * 1024)
 //I2S data format
-#define EXAMPLE_I2S_FORMAT        (I2S_CHANNEL_FMT_RIGHT_LEFT)
+#define EXAMPLE_I2S_FORMAT        (I2S_CHANNEL_FMT_ONLY_RIGHT)
 //I2S channel number
 #define EXAMPLE_I2S_CHANNEL_NUM   ((EXAMPLE_I2S_FORMAT < I2S_CHANNEL_FMT_ONLY_RIGHT) ? (2) : (1))
 //I2S built-in ADC unit
 #define I2S_ADC_UNIT              ADC_UNIT_1
 //I2S built-in ADC channel
-#define I2S_ADC_CHANNEL           ADC1_CHANNEL_0
+#define I2S_ADC_CHANNEL           ADC1_CHANNEL_3
 
 //flash record size, for recording 5 seconds' data
 #define FLASH_RECORD_SIZE         (EXAMPLE_I2S_CHANNEL_NUM * EXAMPLE_I2S_SAMPLE_RATE * EXAMPLE_I2S_SAMPLE_BITS / 8 * 5)
@@ -52,6 +53,13 @@ static const char* TAG = "ad/da";
 //flash read / write address
 #define FLASH_ADDR                (0x200000)
 
+//Out put WS signal from gpio18(only for debug mode)
+void i2s_adc_check_clk(void)
+{
+    PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[18], PIN_FUNC_GPIO);
+    gpio_set_direction(18, GPIO_MODE_DEF_OUTPUT);
+    gpio_matrix_out(18, I2S0I_WS_OUT_IDX, 0, 0);
+}
 
 /**
  * @brief I2S ADC/DAC mode init.
@@ -66,9 +74,9 @@ void example_i2s_init()
 	    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
 	    .channel_format = EXAMPLE_I2S_FORMAT,
 	    .intr_alloc_flags = 0,
-	    .dma_buf_count = 2,
+	    .dma_buf_count = 16,
 	    .dma_buf_len = 1024,
-	    .use_apll = 1,
+	    .use_apll = 0,
 	 };
 	 //install and start i2s driver
 	 i2s_driver_install(i2s_num, &i2s_config, 0, NULL);
@@ -76,6 +84,11 @@ void example_i2s_init()
 	 i2s_set_dac_mode(I2S_DAC_CHANNEL_BOTH_EN);
 	 //init ADC pad
 	 i2s_set_adc_mode(I2S_ADC_UNIT, I2S_ADC_CHANNEL);
+     // workaround
+    //  vTaskDelay(10 / portTICK_PERIOD_MS);
+
+     // enable continuous adc sampling
+     SYSCON.saradc_ctrl2.meas_num_limit = 0;
 }
 
 /*
@@ -280,12 +293,42 @@ void adc_read_task(void* arg)
     }
 }
 
+void adc_i2s_read_task(void *arg)
+{
+    int i2s_read_len = EXAMPLE_I2S_READ_LEN;
+    uint16_t *i2s_read_buff = (uint16_t*) calloc(i2s_read_len, sizeof(char));
+    // i2s_adc_enable(EXAMPLE_I2S_NUM);
+    int cnt = 0;
+    int chCnt[16];
+    while(1){
+        size_t bytes_read = 0;
+        //read data from I2S bus, in this case, from ADC.
+        i2s_read(EXAMPLE_I2S_NUM, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
+        cnt++;
+        // printf("cnt:%3d bytes_read: %d\n",cnt,bytes_read);
+        memset(chCnt, 0, 16*sizeof(int));
+        for (int i = 0; i < bytes_read/2; i+=1) {
+            // printf("num:%3d ch:%2d raw:%4d\n", i, (i2s_read_buff[i] >> 12), (i2s_read_buff[i]) & 0xfff); //i/4
+            chCnt[i2s_read_buff[i] >> 12]++;
+        }
+        for (int i = 0; i < 16; i+=1) {
+            if (chCnt[i] > 0) {
+                printf("ch%2d:%5d ",i,chCnt[i]);
+            }
+        }
+        printf("\n");
+        // vTaskDelay(10 / portTICK_RATE_MS);
+    }
+}
+
 esp_err_t app_main()
 {
     example_i2s_init();
+    i2s_adc_check_clk();
     esp_log_level_set("I2S", ESP_LOG_INFO);
-    xTaskCreate(example_i2s_adc_dac, "example_i2s_adc_dac", 1024 * 2, NULL, 5, NULL);
-    xTaskCreate(adc_read_task, "ADC read task", 2048, NULL, 5, NULL);
+    // xTaskCreate(example_i2s_adc_dac, "example_i2s_adc_dac", 1024 * 2, NULL, 5, NULL);
+    // xTaskCreate(adc_read_task, "ADC read task", 2048, NULL, 5, NULL);
+    xTaskCreate(adc_i2s_read_task, "ADC I2S read task", 20000, NULL, 5, NULL);
     return ESP_OK;
 }
 

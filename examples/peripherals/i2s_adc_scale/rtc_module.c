@@ -15,11 +15,16 @@
 #include <esp_types.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include "esp32/rom/ets_sys.h"
+#include "rom/ets_sys.h"
 #include "esp_log.h"
-#include "soc/rtc_periph.h"
-#include "soc/sens_periph.h"
-#include "soc/syscon_periph.h"
+#include "soc/rtc_io_reg.h"
+#include "soc/rtc_io_struct.h"
+#include "soc/sens_reg.h"
+#include "soc/sens_struct.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/rtc_cntl_struct.h"
+#include "soc/syscon_reg.h"
+#include "soc/syscon_struct.h"
 #include "soc/rtc.h"
 #include "rtc_io.h"
 #include "touch_pad.h"
@@ -39,7 +44,7 @@
 // Enable built-in checks in queue.h in debug builds
 #define INVARIANTS
 #endif
-#include "sys/queue.h"
+#include "rom/queue.h"
 
 
 #define ADC_FSM_RSTB_WAIT_DEFAULT     (8)
@@ -429,6 +434,12 @@ inline static touch_pad_t touch_pad_num_wrap(touch_pad_t touch_num)
     return touch_num;
 }
 
+esp_err_t touch_pad_isr_handler_register(void (*fn)(void *), void *arg, int no_use, intr_handle_t *handle_no_use)
+{
+    RTC_MODULE_CHECK(fn, "Touch_Pad ISR null", ESP_ERR_INVALID_ARG);
+    return rtc_isr_register(fn, arg, RTC_CNTL_TOUCH_INT_ST_M);
+}
+
 esp_err_t touch_pad_isr_register(intr_handler_t fn, void* arg)
 {
     RTC_MODULE_CHECK(fn, "Touch_Pad ISR null", ESP_ERR_INVALID_ARG);
@@ -774,9 +785,9 @@ uint32_t IRAM_ATTR touch_pad_get_status()
 
 esp_err_t IRAM_ATTR touch_pad_clear_status()
 {
-    portENTER_CRITICAL_SAFE(&rtc_spinlock);
+    portENTER_CRITICAL(&rtc_spinlock);
     SENS.sar_touch_ctrl2.touch_meas_en_clr = 1;
-    portEXIT_CRITICAL_SAFE(&rtc_spinlock);
+    portEXIT_CRITICAL(&rtc_spinlock);
     return ESP_OK;
 }
 
@@ -974,30 +985,25 @@ esp_err_t touch_pad_filter_start(uint32_t filter_period_ms)
     RTC_MODULE_CHECK(filter_period_ms >= portTICK_PERIOD_MS, "Touch pad filter period error", ESP_ERR_INVALID_ARG);
     RTC_MODULE_CHECK(rtc_touch_mux != NULL, "Touch pad not initialized", ESP_ERR_INVALID_STATE);
 
+    esp_err_t ret = ESP_OK;
     xSemaphoreTake(rtc_touch_mux, portMAX_DELAY);
     if (s_touch_pad_filter == NULL) {
         s_touch_pad_filter = (touch_pad_filter_t *) calloc(1, sizeof(touch_pad_filter_t));
         if (s_touch_pad_filter == NULL) {
-            goto err_no_mem;
+            ret = ESP_ERR_NO_MEM;
         }
     }
     if (s_touch_pad_filter->timer == NULL) {
         s_touch_pad_filter->timer = xTimerCreate("filter_tmr", filter_period_ms / portTICK_PERIOD_MS, pdFALSE,
-        NULL, (void(*)(TimerHandle_t))touch_pad_filter_cb);
+        NULL, touch_pad_filter_cb);
         if (s_touch_pad_filter->timer == NULL) {
-            free(s_touch_pad_filter);
-            s_touch_pad_filter = NULL;
-            goto err_no_mem;
+            ret = ESP_ERR_NO_MEM;
         }
         s_touch_pad_filter->period = filter_period_ms;
     }
     xSemaphoreGive(rtc_touch_mux);
     touch_pad_filter_cb(NULL);
-    return ESP_OK;
-
-err_no_mem:
-    xSemaphoreGive(rtc_touch_mux);
-    return ESP_ERR_NO_MEM;
+    return ret;
 }
 
 esp_err_t touch_pad_filter_stop()
@@ -1211,12 +1217,10 @@ esp_err_t adc_set_data_inv(adc_unit_t adc_unit, bool inv_en)
     if (adc_unit & ADC_UNIT_1) {
         // Enable ADC data invert
         SENS.sar_read_ctrl.sar1_data_inv = inv_en;
-        SYSCON.saradc_ctrl2.sar1_inv = inv_en;
     }
     if (adc_unit & ADC_UNIT_2) {
         // Enable ADC data invert
         SENS.sar_read_ctrl2.sar2_data_inv = inv_en;
-        SYSCON.saradc_ctrl2.sar2_inv = inv_en;
     }
     portEXIT_CRITICAL(&rtc_spinlock);
     return ESP_OK;
@@ -1341,7 +1345,7 @@ static int adc_convert( adc_unit_t unit, int channel)
 static esp_err_t adc_set_i2s_data_len(adc_unit_t adc_unit, int patt_len)
 {
     ADC_CHECK_UNIT(adc_unit);
-    RTC_MODULE_CHECK((patt_len-1 < ADC_PATT_LEN_MAX) && (patt_len > 0), "ADC pattern length error", ESP_ERR_INVALID_ARG);
+    RTC_MODULE_CHECK((patt_len < ADC_PATT_LEN_MAX) && (patt_len > 0), "ADC pattern length error", ESP_ERR_INVALID_ARG);
     portENTER_CRITICAL(&rtc_spinlock);
     if(adc_unit & ADC_UNIT_1) {
         SYSCON.saradc_ctrl.sar1_patt_len = patt_len - 1;
@@ -1387,40 +1391,12 @@ esp_err_t adc_i2s_mode_init(adc_unit_t adc_unit, adc_channel_t channel)
         RTC_MODULE_CHECK((adc1_channel_t) channel < ADC1_CHANNEL_MAX, "ADC1 channel error", ESP_ERR_INVALID_ARG);
     }
 
-    uint8_t table_len = 16;
+    uint8_t table_len = 1;
     //POWER ON SAR
     adc_power_always_on();
-#ifdef ENABLE_4CH
     adc_gpio_init(adc_unit, channel);
-    adc_gpio_init(adc_unit, ADC1_CHANNEL_0);
-    adc_gpio_init(adc_unit, ADC1_CHANNEL_7);
-    adc_gpio_init(adc_unit, ADC1_CHANNEL_6);
     adc_set_i2s_data_len(adc_unit, table_len);
     adc_set_i2s_data_pattern(adc_unit, 0, channel, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 1, ADC1_CHANNEL_0, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 2, ADC1_CHANNEL_7, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 3, ADC1_CHANNEL_6, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 4, channel, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 5, ADC1_CHANNEL_0, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 6, ADC1_CHANNEL_7, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 7, ADC1_CHANNEL_6, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 8, channel, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 9, ADC1_CHANNEL_0, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 10, ADC1_CHANNEL_7, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 11, ADC1_CHANNEL_6, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 12, channel, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 13, ADC1_CHANNEL_0, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 14, ADC1_CHANNEL_7, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    adc_set_i2s_data_pattern(adc_unit, 15, ADC1_CHANNEL_6, ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-#else
-    for(int i=0;i<ADC1_CHANNEL_MAX;i++) {
-        adc_gpio_init(adc_unit, i);
-    }
-    adc_set_i2s_data_len(adc_unit, table_len);
-    for(int i=0;i<table_len;i++) {
-        adc_set_i2s_data_pattern(adc_unit, i, (i%ADC1_CHANNEL_MAX), ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-    }
-#endif
     portENTER_CRITICAL(&rtc_spinlock);
     if (adc_unit & ADC_UNIT_1) {
         adc_set_controller( ADC_UNIT_1, ADC_CTRL_DIG );
@@ -1530,6 +1506,7 @@ esp_err_t adc1_adc_mode_acquire()
     //lazy initialization
     //for adc1, block until acquire the lock
     _lock_acquire( &adc1_i2s_lock );
+    ESP_LOGD( RTC_MODULE_TAG, "adc mode takes adc1 lock." );
     portENTER_CRITICAL(&rtc_spinlock);
     // for now the WiFi would use ADC2 and set xpd_sar force on.
     // so we can not reset xpd_sar to fsm mode directly.
@@ -1549,6 +1526,7 @@ esp_err_t adc1_lock_release()
     // We should handle this after the synchronization mechanism is established.
 
     _lock_release( &adc1_i2s_lock );
+    ESP_LOGD( RTC_MODULE_TAG, "returns adc1 lock." );
     return ESP_OK;
 }
 
@@ -1570,6 +1548,11 @@ int adc1_get_raw(adc1_channel_t channel)
     portEXIT_CRITICAL(&rtc_spinlock);
     adc1_lock_release();
     return adc_value;
+}
+
+int adc1_get_voltage(adc1_channel_t channel)    //Deprecated. Use adc1_get_raw() instead
+{
+    return adc1_get_raw(channel);
 }
 
 void adc1_ulp_enable(void)
@@ -1725,7 +1708,7 @@ esp_err_t adc2_get_raw(adc2_channel_t channel, adc_bits_width_t width_bit, int* 
     }
 
     //disable other peripherals
-#ifdef CONFIG_ADC_DISABLE_DAC
+#ifdef CONFIG_ADC2_DISABLE_DAC
     adc2_dac_disable( channel );
 #endif
     // set controller
@@ -1868,7 +1851,36 @@ esp_err_t dac_output_voltage(dac_channel_t channel, uint8_t dac_value)
     return ESP_OK;
 }
 
-esp_err_t dac_i2s_enable(void)
+esp_err_t dac_out_voltage(dac_channel_t channel, uint8_t dac_value)
+{
+    RTC_MODULE_CHECK((channel >= DAC_CHANNEL_1) && (channel < DAC_CHANNEL_MAX), DAC_ERR_STR_CHANNEL_ERROR, ESP_ERR_INVALID_ARG);
+    portENTER_CRITICAL(&rtc_spinlock);
+    //Disable Tone
+    CLEAR_PERI_REG_MASK(SENS_SAR_DAC_CTRL1_REG, SENS_SW_TONE_EN);
+
+    //Disable Channel Tone
+    if (channel == DAC_CHANNEL_1) {
+        CLEAR_PERI_REG_MASK(SENS_SAR_DAC_CTRL2_REG, SENS_DAC_CW_EN1_M);
+    } else if (channel == DAC_CHANNEL_2) {
+        CLEAR_PERI_REG_MASK(SENS_SAR_DAC_CTRL2_REG, SENS_DAC_CW_EN2_M);
+    }
+
+    //Set the Dac value
+    if (channel == DAC_CHANNEL_1) {
+        SET_PERI_REG_BITS(RTC_IO_PAD_DAC1_REG, RTC_IO_PDAC1_DAC, dac_value, RTC_IO_PDAC1_DAC_S);   //dac_output
+    } else if (channel == DAC_CHANNEL_2) {
+        SET_PERI_REG_BITS(RTC_IO_PAD_DAC2_REG, RTC_IO_PDAC2_DAC, dac_value, RTC_IO_PDAC2_DAC_S);   //dac_output
+    }
+
+    portEXIT_CRITICAL(&rtc_spinlock);
+    //dac pad init
+    dac_rtc_pad_init(channel);
+    dac_output_enable(channel);
+
+    return ESP_OK;
+}
+
+esp_err_t dac_i2s_enable()
 {
     portENTER_CRITICAL(&rtc_spinlock);
     SET_PERI_REG_MASK(SENS_SAR_DAC_CTRL1_REG, SENS_DAC_DIG_FORCE_M | SENS_DAC_CLK_INV_M);
@@ -1952,15 +1964,15 @@ static void rtc_isr(void* arg)
 {
     uint32_t status = REG_READ(RTC_CNTL_INT_ST_REG);
     rtc_isr_handler_t* it;
-    portENTER_CRITICAL_ISR(&s_rtc_isr_handler_list_lock);
+    portENTER_CRITICAL(&s_rtc_isr_handler_list_lock);
     SLIST_FOREACH(it, &s_rtc_isr_handler_list, next) {
         if (it->mask & status) {
-            portEXIT_CRITICAL_ISR(&s_rtc_isr_handler_list_lock);
+            portEXIT_CRITICAL(&s_rtc_isr_handler_list_lock);
             (*it->handler)(it->handler_arg);
-            portENTER_CRITICAL_ISR(&s_rtc_isr_handler_list_lock);
+            portENTER_CRITICAL(&s_rtc_isr_handler_list_lock);
         }
     }
-    portEXIT_CRITICAL_ISR(&s_rtc_isr_handler_list_lock);
+    portEXIT_CRITICAL(&s_rtc_isr_handler_list_lock);
     REG_WRITE(RTC_CNTL_INT_CLR_REG, status);
 }
 
@@ -2026,42 +2038,4 @@ esp_err_t rtc_isr_deregister(intr_handler_t handler, void* handler_arg)
     }
     portEXIT_CRITICAL(&s_rtc_isr_handler_list_lock);
     return found ? ESP_OK : ESP_ERR_INVALID_STATE;
-}
-
-/*  Since IDF has not added this function yet, it needs to be manually added by the user (driver/rtc_module.c) */
-
-esp_err_t adc_i2s_scale_mode_init(adc_unit_t adc_unit, adc_channel_t *channel, uint8_t channel_num)
-{
-    ADC_CHECK_UNIT(adc_unit);
-    esp_err_t ret = ESP_FAIL;
-    uint8_t table_len = channel_num;
-    adc_power_always_on();
-    ret = adc_set_i2s_data_len(adc_unit, table_len);
-    if(ret != ESP_OK) return ret;
-    for(int i = 0; i < channel_num; i++) {
-        ret = adc_gpio_init(adc_unit, channel[i]);
-        if(ret != ESP_OK) return ret;
-        ret =  adc_set_i2s_data_pattern(adc_unit, i, channel[i], ADC_WIDTH_BIT_12, ADC_ATTEN_DB_11);
-        if(ret != ESP_OK) return ret;
-    }
-    portENTER_CRITICAL(&rtc_spinlock);
-    if (adc_unit & ADC_UNIT_1) {
-        adc_set_controller( ADC_UNIT_1, ADC_CTRL_DIG );
-    }
-    if (adc_unit & ADC_UNIT_2) {
-        adc_set_controller( ADC_UNIT_2, ADC_CTRL_DIG );
-    }
-    portEXIT_CRITICAL(&rtc_spinlock);
-    adc_set_i2s_data_source(ADC_I2S_DATA_SRC_ADC);
-    //adc_set_i2s_data_source(ADC_I2S_DATA_SRC_IO_SIG);
-    adc_set_clk_div(SAR_ADC_CLK_DIV_DEFUALT);
-    // Set internal FSM wait time.
-    adc_set_fsm_time(ADC_FSM_RSTB_WAIT_DEFAULT, ADC_FSM_START_WAIT_DEFAULT, ADC_FSM_STANDBY_WAIT_DEFAULT,
-            ADC_FSM_TIME_KEEP);
-    adc_set_work_mode(adc_unit);
-    adc_set_data_format(ADC_ENCODE_12BIT);
-    adc_set_measure_limit(ADC_MAX_MEAS_NUM_DEFAULT, ADC_MEAS_NUM_LIM_DEFAULT);
-    //Invert The Level, Invert SAR ADC1 data
-    adc_set_data_inv(adc_unit, false);
-    return ESP_OK;
 }

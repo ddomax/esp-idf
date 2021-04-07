@@ -24,8 +24,8 @@
  * - Pin assignment: see defines below
  */
 
-#define ECHO_TEST_TXD  (GPIO_NUM_4)
-#define ECHO_TEST_RXD  (GPIO_NUM_5)
+#define ECHO_TEST_TXD  (GPIO_NUM_1)
+#define ECHO_TEST_RXD  (GPIO_NUM_3)
 #define ECHO_TEST_RTS  (UART_PIN_NO_CHANGE)
 #define ECHO_TEST_CTS  (UART_PIN_NO_CHANGE)
 
@@ -42,18 +42,18 @@ static void echo_task()
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
     };
-    uart_param_config(UART_NUM_1, &uart_config);
-    uart_set_pin(UART_NUM_1, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS);
-    uart_driver_install(UART_NUM_1, BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(UART_NUM_0, &uart_config);
+    uart_set_pin(UART_NUM_0, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS);
+    uart_driver_install(UART_NUM_0, BUF_SIZE * 2, 0, 0, NULL, 0);
 
     // Configure a temporary buffer for the incoming data
     uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
 
     while (1) {
         // Read data from the UART
-        int len = uart_read_bytes(UART_NUM_1, data, BUF_SIZE, 20 / portTICK_RATE_MS);
+        int len = uart_read_bytes(UART_NUM_0, data, BUF_SIZE, 20 / portTICK_RATE_MS);
         // Write data back to the UART
-        uart_write_bytes(UART_NUM_1, (const char *) data, len);
+        uart_write_bytes(UART_NUM_0, (const char *) data, len);
     }
 }
 

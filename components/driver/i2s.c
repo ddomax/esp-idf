@@ -429,7 +429,7 @@ esp_err_t i2s_set_clk(i2s_port_t i2s_num, uint32_t rate, i2s_bits_per_sample_t b
         //According to the TRM, WS clk equals to the sample rate, and bclk is double the speed of WS
         uint32_t b_clk = rate * I2S_AD_BCK_FACTOR;
         fi2s_clk /= I2S_AD_BCK_FACTOR;
-        int factor2 = 60;
+        int factor2 = 20;
         mclk = b_clk * factor2;
         clkmdiv = ((double) I2S_BASE_CLK) / mclk;
         clkmInteger = clkmdiv;
@@ -483,7 +483,12 @@ esp_err_t i2s_set_clk(i2s_port_t i2s_num, uint32_t rate, i2s_bits_per_sample_t b
         I2S[i2s_num]->clkm_conf.clkm_div_num = clkmInteger;
         I2S[i2s_num]->sample_rate_conf.tx_bck_div_num = bck;
         I2S[i2s_num]->sample_rate_conf.rx_bck_div_num = bck;
-        double real_rate = (double) (I2S_BASE_CLK / (bck * bits * clkmInteger) / 2);
+        double real_rate;
+        if(p_i2s_obj[i2s_num]->mode & (I2S_MODE_DAC_BUILT_IN | I2S_MODE_ADC_BUILT_IN)){
+            real_rate = (double) (I2S_BASE_CLK / (bck * (clkmInteger+clkmDecimals*denom)) / 2);
+        } else {
+            real_rate = (double) (I2S_BASE_CLK / (bck * bits * clkmInteger) / 2);
+        }
         p_i2s_obj[i2s_num]->real_rate = real_rate;
         ESP_LOGI(I2S_TAG, "PLL_D2: Req RATE: %d, real rate: %0.3f, BITS: %u, CLKM: %u, BCK: %u, MCLK: %0.3f, SCLK: %f, diva: %d, divb: %d",
             rate, real_rate, bits, clkmInteger, bck, (double)I2S_BASE_CLK / mclk, real_rate*bits*channel, 64, clkmDecimals);
@@ -553,6 +558,7 @@ static void IRAM_ATTR i2s_intr_handler_default(void *arg)
         finish_desc = (lldesc_t*) i2s_reg->in_eof_des_addr;
         if (xQueueIsQueueFullFromISR(p_i2s->rx->queue)) {
             xQueueReceiveFromISR(p_i2s->rx->queue, &dummy, &high_priority_task_awoken);
+            ESP_EARLY_LOGE(I2S_TAG, "All I2S DMA Buffers are full. Data dummy occurred!\n");
         }
         xQueueSendFromISR(p_i2s->rx->queue, (void*)(&finish_desc->buf), &high_priority_task_awoken);
         if (p_i2s->i2s_queue) {
